@@ -17,11 +17,57 @@ index 648ee01..2858248 100644
                  if (width != width_0 || height != height_0) {
                  logger_log(raop_rtp_mirror->logger, LOGGER_DEBUG, "raop_rtp_mirror: Unexpected : data  %f,"
                             " %f != width_source = %f, height_source = %f", width_0, height_0, width_source, height_source);
+diff --git a/renderers/video_renderer.c b/renderers/video_renderer.c
+index b6c1f1c..d862196 100644
+--- a/renderers/video_renderer.c
++++ b/renderers/video_renderer.c
+@@ -1238,3 +1238,21 @@ bool gstreamer_decoder_check(const char *decoder) {
+     gst_object_unref(factory);
+     return true;
+ }
++
++/* iPhoneMirror: rotate the picture at runtime (0 identity, 1 90r, 2 180, 3 90l) */
++void video_renderer_set_rotation(int method) {
++    int count = 0;
++    for (int i = 0; i < n_renderers; i++) {
++        if (!renderer_type[i] || !renderer_type[i]->pipeline) continue;
++        GstElement *sink = gst_bin_get_by_interface(GST_BIN(renderer_type[i]->pipeline), GST_TYPE_VIDEO_OVERLAY);
++        if (sink) {
++            if (g_object_class_find_property(G_OBJECT_GET_CLASS(sink), "rotate-method")) {
++                g_object_set(sink, "rotate-method", method, NULL);
++                count++;
++            }
++            gst_object_unref(sink);
++        }
++    }
++    logger_log(logger, LOGGER_INFO, "*** iPhoneMirror: rotate %d (%d video sinks)", method, count);
++}
++
+diff --git a/renderers/video_renderer.h b/renderers/video_renderer.h
+index 4a6e012..d524924 100644
+--- a/renderers/video_renderer.h
++++ b/renderers/video_renderer.h
+@@ -84,6 +84,7 @@ unsigned int video_renderer_listen(void *loop, int id);
+ bool video_renderer_eos_watch();
+ void video_renderer_hls_set_volume(double volume);
+ void video_renderer_set_window_handle(uintptr_t handle);
++void video_renderer_set_rotation(int method);
+ bool gstreamer_decoder_check(const char *decoder);
+ #ifdef __cplusplus
+ }
 diff --git a/uxplay.cpp b/uxplay.cpp
-index 71a378d..28d7777 100644
+index 71a378d..7588745 100644
 --- a/uxplay.cpp
 +++ b/uxplay.cpp
-@@ -2728,6 +2728,7 @@ extern "C" void conn_destroy (void *cls) {
+@@ -31,6 +31,7 @@
+ #include <fstream>
+ #include <sstream>
+ #include <iostream>
++#include <thread>
+ #include <memory>
+ #include <iterator>
+ #include <sys/stat.h>
+@@ -2728,6 +2729,7 @@ extern "C" void conn_destroy (void *cls) {
      open_connections--;
      LOGD("Open connections: %i", open_connections);
      if (open_connections == 0) {
@@ -29,12 +75,22 @@ index 71a378d..28d7777 100644
          remote_clock_offset = 0;
          if (use_audio) {
              audio_renderer_stop();
-@@ -3387,6 +3388,8 @@ void real_main (int argc, char *argv[]) {
+@@ -3387,6 +3389,18 @@ void real_main (int argc, char *argv[]) {
  #else
  int main (int argc, char *argv[]) {
  #endif
 +    setvbuf(stdout, NULL, _IONBF, 0); /* iPhoneMirror: unbuffered output for the GUI */
 +    setvbuf(stderr, NULL, _IONBF, 0);
++    /* iPhoneMirror: commands from the GUI on stdin ("rotate <0-3>") */
++    std::thread([]() {
++        std::string line;
++        while (std::getline(std::cin, line)) {
++            int m;
++            if (sscanf(line.c_str(), "rotate %d", &m) == 1 && m >= 0 && m <= 3) {
++                video_renderer_set_rotation(m);
++            }
++        }
++    }).detach();
      std::vector<char> server_hw_addr;
      std::string config_file = "";
  

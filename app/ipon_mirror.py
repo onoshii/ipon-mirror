@@ -19,7 +19,7 @@ import tkinter as tk
 import app_volume
 
 APP_NAME = "Ipon Mirror"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # ---------------------------------------------------------------- paths
 if getattr(sys, "frozen", False):  # PyInstaller でまとめた配布版
@@ -55,7 +55,7 @@ def find_engine():
     return None, None
 
 
-DEFAULTS = {"name": APP_NAME, "audio": True, "volume": 80, "muted": False}
+DEFAULTS = {"name": APP_NAME, "audio": True, "volume": 40, "muted": False}
 ICON_FONT = ("Segoe MDL2 Assets", 12)
 ICON_VOL, ICON_MUTE = "", ""
 
@@ -232,10 +232,12 @@ class VideoWindow:
     """タイトルバーなしの映像ウィンドウ。
     ドラッグで移動 / ホイールで拡大縮小 / ダブルクリックで全画面 / 右クリックでメニュー / 右上の × で終了"""
 
-    def __init__(self, root, on_close, on_volume_key=None):
+    def __init__(self, root, on_close, on_volume_key=None, on_rotate=None):
         self.root = root
         self.on_close = on_close
         self.on_volume_key = on_volume_key  # "up" / "down" / "mute" -> 表示する文字列
+        self.on_rotate = on_rotate          # 回転ボタン / R キー
+        self.rotation = 0                   # 手動回転 (0, 90, 180, 270 度・時計回り)
         self.win = tk.Toplevel(root, bg="black")
         self.win.title(f"{APP_NAME} - 画面")
         self.win.overrideredirect(True)
@@ -260,6 +262,12 @@ class VideoWindow:
         self.close_btn.bind("<Button-1>", lambda e: self.on_close())
         self.close_btn.bind("<Enter>", lambda e: self.close_btn.config(bg=ERR))
         self.close_btn.bind("<Leave>", lambda e: self.close_btn.config(bg="#2a2b31"))
+        # 回転ボタン (カメラなど、iPhone 側で画面が回らないアプリ用)
+        self.rotate_btn = tk.Label(self.win, text="", bg="#2a2b31", fg="#f2f2f4", cursor="hand2",
+                                   font=("Segoe MDL2 Assets", 11), padx=8, pady=5)
+        self.rotate_btn.bind("<Button-1>", lambda e: self.on_rotate and self.on_rotate())
+        self.rotate_btn.bind("<Enter>", lambda e: self.rotate_btn.config(bg=ACCENT))
+        self.rotate_btn.bind("<Leave>", lambda e: self.rotate_btn.config(bg="#2a2b31"))
 
         for w in (self.win, self.surface):
             w.bind("<ButtonPress-1>", self._drag_start)
@@ -276,12 +284,15 @@ class VideoWindow:
         self._toast_job = None
         for key, act in (("<Up>", "up"), ("<Down>", "down"), ("<m>", "mute"), ("<M>", "mute")):
             self.win.bind(key, lambda e, a=act: self._volume_key(a))
+        for key in ("<r>", "<R>"):
+            self.win.bind(key, lambda e: self.on_rotate and self.on_rotate())
         self.surface.bind("<Configure>", lambda e: self.fit_children())
 
         self.menu = tk.Menu(self.win, tearoff=0)
         self.menu.add_checkbutton(label="常に手前に表示", variable=self.topmost,
                                   command=lambda: self.win.attributes("-topmost", self.topmost.get()))
         self.menu.add_command(label="全画面 / 元に戻す", command=self.toggle_fullscreen)
+        self.menu.add_command(label="映像を回転 (R)", command=lambda: self.on_rotate and self.on_rotate())
         self.menu.add_command(label="音量を上げる (↑)", command=lambda: self._volume_key("up"))
         self.menu.add_command(label="音量を下げる (↓)", command=lambda: self._volume_key("down"))
         self.menu.add_command(label="ミュート切替 (M)", command=lambda: self._volume_key("mute"))
@@ -326,6 +337,9 @@ class VideoWindow:
     def _show_close(self):
         self.close_btn.place(relx=1.0, x=-10, y=10, anchor="ne")
         self.close_btn.lift()
+        self.win.update_idletasks()
+        self.rotate_btn.place(relx=1.0, x=-(self.close_btn.winfo_width() + 16), y=10, anchor="ne")
+        self.rotate_btn.lift()
         if self._hide_close_job:
             self.win.after_cancel(self._hide_close_job)
         self._hide_close_job = self.win.after(2000, self._hide_close)
@@ -333,10 +347,11 @@ class VideoWindow:
     def _hide_close(self):
         self._hide_close_job = None
         x, y = self.win.winfo_pointerxy()
-        if self.win.winfo_containing(x, y) is self.close_btn:  # ボタン上なら出したまま
+        if self.win.winfo_containing(x, y) in (self.close_btn, self.rotate_btn):  # ボタン上なら出したまま
             self._hide_close_job = self.win.after(1000, self._hide_close)
         else:
             self.close_btn.place_forget()
+            self.rotate_btn.place_forget()
 
     def _volume_key(self, action):
         if self.on_volume_key:
@@ -374,6 +389,8 @@ class VideoWindow:
 
     def show(self, src_w, src_h):
         self.last_src = (src_w, src_h)
+        if self.rotation in (90, 270):  # 手動で横にしている → 窓も縦横入れ替え
+            src_w, src_h = src_h, src_w
         self.aspect = src_w / src_h
         if self.fullscreen:  # 全画面中は映像側が自動で収まる。戻すときに新しい向きで作り直す
             return
@@ -398,6 +415,7 @@ class VideoWindow:
         if self.fullscreen:
             self.toggle_fullscreen()
         self.close_btn.place_forget()
+        self.rotate_btn.place_forget()
         self.toast_lbl.place_forget()
         self.win.withdraw()
 
@@ -500,7 +518,7 @@ class MirrorApp:
         except (OSError, AttributeError):
             pass
 
-        self.video = VideoWindow(root, self.end_mirroring, self.volume_key)
+        self.video = VideoWindow(root, self.end_mirroring, self.volume_key, self.rotate)
         self._build_ui()
 
         self.root.after(100, self.poll)
@@ -639,9 +657,30 @@ class MirrorApp:
         self._save_job = self.root.after(500, lambda: save_settings(self.settings))
 
     def _volume_watch(self):
-        # 音声が流れ始めるたびに Windows 側の「セッション」が作られるので、定期的に掛け直す
+        # 音声が流れ始めるたびに Windows 側の「セッション」が作られるので、すぐ掛け直す
+        # (間隔が長いと、最初の一瞬だけ大きな音が出てしまう)
         self.apply_volume()
-        self.root.after(1000, self._volume_watch)
+        self.root.after(200, self._volume_watch)
+
+    # ---- 回転 (カメラなど、iPhone 側で画面が回らないアプリ用) ----
+    def send_engine(self, command):
+        try:
+            if self.proc and self.proc.stdin:
+                self.proc.stdin.write(command + "\n")
+                self.proc.stdin.flush()
+        except (OSError, ValueError):
+            pass
+
+    def set_rotation(self, deg):
+        self.video.rotation = deg % 360
+        self.send_engine(f"rotate {(0, 1, 2, 3)[self.video.rotation // 90]}")  # identity / 90r / 180 / 90l
+
+    def rotate(self):
+        if not self.video.win.winfo_viewable():
+            return
+        self.set_rotation(self.video.rotation + 90)
+        self.video.show(*self.video.last_src)
+        self.video.toast(f"回転 {self.video.rotation}°" if self.video.rotation else "回転なし")
 
     def close_settings(self):
         self.main_view.tkraise()
@@ -673,7 +712,7 @@ class MirrorApp:
             args += ["-as", "0"]
         try:
             self.proc = subprocess.Popen(
-                args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE,
                 env=self.engine_env, cwd=os.path.dirname(self.engine),
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 text=True, encoding="utf-8", errors="replace", bufsize=1)
@@ -697,6 +736,7 @@ class MirrorApp:
             except subprocess.TimeoutExpired:
                 proc.kill()
         self.device = ""
+        self.video.rotation = 0  # 新しいエンジンは回転なしで始まる
         self.video.hide()
         self.set_state("stopped")
 
@@ -743,10 +783,14 @@ class MirrorApp:
         m = re.search(r"connection request from (.+?) \(", line)
         if m:
             self.device = m.group(1)
-        m = (re.search(r"geometry is \(w,h\)=\((\d+),(\d+)\) \(source\)", line)
-             or re.search(r"iPhoneMirror: size (\d+)x(\d+)", line))
+        new_stream = re.search(r"geometry is \(w,h\)=\((\d+),(\d+)\) \(source\)", line)
+        m = new_stream or re.search(r"iPhoneMirror: size (\d+)x(\d+)", line)
         if m and int(m.group(1)) > 0 and int(m.group(2)) > 0:
-            self.video.show(int(m.group(1)), int(m.group(2)))
+            size = (int(m.group(1)), int(m.group(2)))
+            # 新しい接続 or iPhone 自身が回転した → 手動回転は解除
+            if self.video.rotation and (new_stream or size != self.video.last_src):
+                self.set_rotation(0)
+            self.video.show(*size)
             self.set_state("mirroring")
         if "iPhoneMirror: all clients disconnected" in line:
             self.device = ""
