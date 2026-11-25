@@ -1,0 +1,40 @@
+diff --git a/lib/raop_rtp_mirror.c b/lib/raop_rtp_mirror.c
+index 648ee01..2858248 100644
+--- a/lib/raop_rtp_mirror.c
++++ b/lib/raop_rtp_mirror.c
+@@ -596,6 +596,14 @@ raop_rtp_mirror_thread(void *arg)
+                 float width = byteutils_get_float(packet, 56);
+                 float height = byteutils_get_float(packet, 60);
+ 
++                {   /* iPhoneMirror: report every change of picture size (rotation) */
++                    static unsigned short last_w = 0, last_h = 0;
++                    unsigned short cw = (unsigned short) width_source, ch = (unsigned short) height_source;
++                    if (cw && ch && (cw != last_w || ch != last_h)) {
++                        last_w = cw; last_h = ch;
++                        logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "*** iPhoneMirror: size %ux%u", cw, ch);
++                    }
++                }
+                 if (width != width_0 || height != height_0) {
+                 logger_log(raop_rtp_mirror->logger, LOGGER_DEBUG, "raop_rtp_mirror: Unexpected : data  %f,"
+                            " %f != width_source = %f, height_source = %f", width_0, height_0, width_source, height_source);
+diff --git a/uxplay.cpp b/uxplay.cpp
+index 71a378d..28d7777 100644
+--- a/uxplay.cpp
++++ b/uxplay.cpp
+@@ -2728,6 +2728,7 @@ extern "C" void conn_destroy (void *cls) {
+     open_connections--;
+     LOGD("Open connections: %i", open_connections);
+     if (open_connections == 0) {
++        LOGI("*** iPhoneMirror: all clients disconnected");
+         remote_clock_offset = 0;
+         if (use_audio) {
+             audio_renderer_stop();
+@@ -3387,6 +3388,8 @@ void real_main (int argc, char *argv[]) {
+ #else
+ int main (int argc, char *argv[]) {
+ #endif
++    setvbuf(stdout, NULL, _IONBF, 0); /* iPhoneMirror: unbuffered output for the GUI */
++    setvbuf(stderr, NULL, _IONBF, 0);
+     std::vector<char> server_hw_addr;
+     std::string config_file = "";
+ 
