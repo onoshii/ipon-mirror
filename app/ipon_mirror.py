@@ -16,6 +16,8 @@ import threading
 import time
 import tkinter as tk
 
+import app_volume
+
 APP_NAME = "Ipon Mirror"
 VERSION = "1.0.0"
 
@@ -53,7 +55,9 @@ def find_engine():
     return None, None
 
 
-DEFAULTS = {"name": APP_NAME, "audio": True}
+DEFAULTS = {"name": APP_NAME, "audio": True, "volume": 80, "muted": False}
+ICON_FONT = ("Segoe MDL2 Assets", 12)
+ICON_VOL, ICON_MUTE = "", ""
 
 # 低遅延: 映像を音声に同期させない + GPU (D3D12) でデコードから表示まで完結
 FAST_ARGS = ["-vsync", "no", "-vd", "d3d12h264dec", "-vc", "d3d12convert", "-vs", "d3d12videosink"]
@@ -228,9 +232,10 @@ class VideoWindow:
     """タイトルバーなしの映像ウィンドウ。
     ドラッグで移動 / ホイールで拡大縮小 / ダブルクリックで全画面 / 右クリックでメニュー / 右上の × で終了"""
 
-    def __init__(self, root, on_close):
+    def __init__(self, root, on_close, on_volume_key=None):
         self.root = root
         self.on_close = on_close
+        self.on_volume_key = on_volume_key  # "up" / "down" / "mute" -> 表示する文字列
         self.win = tk.Toplevel(root, bg="black")
         self.win.title(f"{APP_NAME} - 画面")
         self.win.overrideredirect(True)
@@ -265,12 +270,21 @@ class VideoWindow:
             w.bind("<Button-3>", self._menu)
             w.bind("<Motion>", lambda e: self._show_close())
         self.win.bind("<Escape>", lambda e: self.fullscreen and self.toggle_fullscreen())
+        # 音量: ↑ / ↓ / M
+        self.toast_lbl = tk.Label(self.win, bg="#2a2b31", fg="#f2f2f4", font=("Yu Gothic UI", 10, "bold"),
+                                  padx=10, pady=3)
+        self._toast_job = None
+        for key, act in (("<Up>", "up"), ("<Down>", "down"), ("<m>", "mute"), ("<M>", "mute")):
+            self.win.bind(key, lambda e, a=act: self._volume_key(a))
         self.surface.bind("<Configure>", lambda e: self.fit_children())
 
         self.menu = tk.Menu(self.win, tearoff=0)
         self.menu.add_checkbutton(label="常に手前に表示", variable=self.topmost,
                                   command=lambda: self.win.attributes("-topmost", self.topmost.get()))
         self.menu.add_command(label="全画面 / 元に戻す", command=self.toggle_fullscreen)
+        self.menu.add_command(label="音量を上げる (↑)", command=lambda: self._volume_key("up"))
+        self.menu.add_command(label="音量を下げる (↓)", command=lambda: self._volume_key("down"))
+        self.menu.add_command(label="ミュート切替 (M)", command=lambda: self._volume_key("mute"))
         self.menu.add_separator()
         self.menu.add_command(label="ミラーリングを終了", command=self.on_close)
 
@@ -324,6 +338,21 @@ class VideoWindow:
         else:
             self.close_btn.place_forget()
 
+    def _volume_key(self, action):
+        if self.on_volume_key:
+            text = self.on_volume_key(action)
+            if text:
+                self.toast(text)
+
+    def toast(self, text):
+        """左上に一瞬だけ表示 (音量など)"""
+        self.toast_lbl.config(text=text)
+        self.toast_lbl.place(x=10, y=10, anchor="nw")
+        self.toast_lbl.lift()
+        if self._toast_job:
+            self.win.after_cancel(self._toast_job)
+        self._toast_job = self.win.after(1200, self.toast_lbl.place_forget)
+
     def _screen(self):
         r = monitor_rect(self.frame_hwnd()) if self.win.winfo_viewable() else None
         return r or (0, 0, self.win.winfo_screenwidth(), self.win.winfo_screenheight())
@@ -369,6 +398,7 @@ class VideoWindow:
         if self.fullscreen:
             self.toggle_fullscreen()
         self.close_btn.place_forget()
+        self.toast_lbl.place_forget()
         self.win.withdraw()
 
     def toggle_fullscreen(self):
@@ -409,6 +439,36 @@ class VideoWindow:
         self.menu.tk_popup(e.x_root, e.y_root)
 
 
+class Slider(tk.Canvas):
+    """細いトラック + 青い塗り + 白いつまみ の音量スライダー (0-100)"""
+
+    def __init__(self, parent, var, on_change, height=18, width=130):
+        super().__init__(parent, height=height, width=width, bg=BG, highlightthickness=0, bd=0, cursor="hand2")
+        self.var, self.on_change, self.h = var, on_change, height
+        self.dimmed = False
+        self.bind("<Configure>", lambda e: self.redraw())
+        var.trace_add("write", lambda *a: self.redraw())  # キー操作などで値が変わっても追従
+        self.bind("<Button-1>", self._set_from)
+        self.bind("<B1-Motion>", self._set_from)
+
+    def _set_from(self, e):
+        w = max(self.winfo_width() - self.h, 1)
+        v = round(min(max((e.x - self.h / 2) / w, 0), 1) * 100)
+        if v != self.var.get():
+            self.var.set(v)
+            self.on_change()
+
+    def redraw(self):
+        self.delete("all")
+        w, h, r = self.winfo_width(), self.h, self.h / 2
+        y = h / 2
+        x = r + (w - h) * self.var.get() / 100
+        self.create_line(r, y, w - r, y, fill=BTN, width=4, capstyle="round")
+        if self.var.get() > 0:
+            self.create_line(r, y, x, y, fill=SUB if self.dimmed else ACCENT, width=4, capstyle="round")
+        self.create_oval(x - 6, y - 6, x + 6, y + 6, fill=FG, outline="")
+
+
 # ---------------------------------------------------------------- main window
 class MirrorApp:
     def __init__(self, root):
@@ -440,10 +500,11 @@ class MirrorApp:
         except (OSError, AttributeError):
             pass
 
-        self.video = VideoWindow(root, self.end_mirroring)
+        self.video = VideoWindow(root, self.end_mirroring, self.volume_key)
         self._build_ui()
 
         self.root.after(100, self.poll)
+        self.root.after(1000, self._volume_watch)
         if self.engine:
             kill_leftover_engines(self.engine)
             self.start()
@@ -476,9 +537,24 @@ class MirrorApp:
                             font=("Yu Gothic UI", 11, "bold"), width=18, pady=8, cursor="hand2")
         self.btn.pack()
         self.btn.bind("<Button-1>", lambda e: self.toggle())
+
+        # 音量 (iPhone 側の音量ボタンとは別に、PC 側で調整)
+        vol_row = tk.Frame(self.main_view, bg=BG)
+        vol_row.pack(fill="x", pady=(14, 0))
+        self.mute_btn = tk.Label(vol_row, text="", bg=BG, fg=FG, font=ICON_FONT, cursor="hand2", width=2)
+        self.mute_btn.pack(side="left")
+        self.mute_btn.bind("<Button-1>", lambda e: self.toggle_mute())
+        self.vol_var = tk.IntVar(value=int(self.settings["volume"]))
+        self.vol_scale = Slider(vol_row, self.vol_var, self.on_volume_change)
+        self.vol_scale.pack(side="left", fill="x", expand=True, padx=(4, 6))
+        self.vol_scale.bind("<MouseWheel>", lambda e: self.change_volume(5 if e.delta > 0 else -5))
+        self.vol_lbl = tk.Label(vol_row, text="", bg=BG, fg=SUB, font=("Yu Gothic UI", 9), width=6, anchor="e")
+        self.vol_lbl.pack(side="left")
+        self._refresh_volume_ui()
+
         gear = tk.Label(self.main_view, text="設定", bg=BG, fg=SUB,
                         font=("Yu Gothic UI", 9, "underline"), cursor="hand2")
-        gear.pack(pady=(14, 0))
+        gear.pack(pady=(10, 0))
         gear.bind("<Button-1>", lambda e: self.settings_view.tkraise())
 
         sv = self.settings_view
@@ -512,6 +588,61 @@ class MirrorApp:
             self.status.config(text=detail, fg=ERR)
             self.btn.config(text="開始", bg=ACCENT)
 
+    # ---- 音量 ----
+    def _refresh_volume_ui(self):
+        muted = self.settings["muted"] or not self.settings["audio"]
+        self.mute_btn.config(text=ICON_MUTE if muted else ICON_VOL, fg=SUB if muted else FG)
+        self.vol_lbl.config(text="オフ" if not self.settings["audio"] else
+                            ("ミュート" if self.settings["muted"] else f"{self.vol_var.get()}%"))
+        self.vol_scale.dimmed = muted
+        self.vol_scale.redraw()
+
+    def apply_volume(self):
+        if self.proc and self.settings["audio"]:
+            try:
+                app_volume.set_volume(self.proc.pid, self.settings["volume"] / 100, self.settings["muted"])
+            except OSError:
+                pass
+
+    def on_volume_change(self):
+        self.settings["volume"] = self.vol_var.get()
+        if self.settings["muted"] and self.settings["volume"] > 0:
+            self.settings["muted"] = False  # スライダーを動かしたらミュート解除
+        self._refresh_volume_ui()
+        self.apply_volume()
+        self._save_later()
+
+    def change_volume(self, delta):
+        self.vol_var.set(min(100, max(0, self.vol_var.get() + delta)))
+        self.on_volume_change()
+
+    def toggle_mute(self):
+        if not self.settings["audio"]:
+            return
+        self.settings["muted"] = not self.settings["muted"]
+        self._refresh_volume_ui()
+        self.apply_volume()
+        self._save_later()
+
+    def volume_key(self, action):
+        if not self.settings["audio"]:
+            return "音声はオフです (設定で変更)"
+        if action == "mute":
+            self.toggle_mute()
+        else:
+            self.change_volume(5 if action == "up" else -5)
+        return "ミュート" if self.settings["muted"] else f"音量 {self.settings['volume']}%"
+
+    def _save_later(self):
+        if getattr(self, "_save_job", None):
+            self.root.after_cancel(self._save_job)
+        self._save_job = self.root.after(500, lambda: save_settings(self.settings))
+
+    def _volume_watch(self):
+        # 音声が流れ始めるたびに Windows 側の「セッション」が作られるので、定期的に掛け直す
+        self.apply_volume()
+        self.root.after(1000, self._volume_watch)
+
     def close_settings(self):
         self.main_view.tkraise()
         name = self.name_var.get().strip() or DEFAULTS["name"]
@@ -520,6 +651,7 @@ class MirrorApp:
             return
         self.settings.update(name=name, audio=self.audio_var.get())
         save_settings(self.settings)
+        self._refresh_volume_ui()
         if self.proc:  # 動作中なら受信をやり直して反映
             self.stop()
             self.start()
