@@ -21,5 +21,5 @@ iPhone の画面を無線 (AirPlay) で Windows に映すアプリです。
 
 ■ ライセンス
   GPL-3.0 (LICENSE.txt)。同梱ソフトウェアのライセンスは licenses フォルダにあります。
-  ソースコード: GitHub の ipon-mirror リポジトリ
+  ソースコード: https://github.com/onoshii/ipon-mirror
   iPhone、AirPlay は Apple Inc. の商標です。このソフトは Apple とは関係ありません。
