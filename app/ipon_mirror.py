@@ -19,7 +19,7 @@ import tkinter as tk
 import app_volume
 
 APP_NAME = "Ipon Mirror"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 # ---------------------------------------------------------------- paths
 if getattr(sys, "frozen", False):  # PyInstaller でまとめた配布版
@@ -55,7 +55,8 @@ def find_engine():
     return None, None
 
 
-DEFAULTS = {"name": APP_NAME, "audio": True, "volume": 40, "muted": False}
+DEFAULTS = {"name": APP_NAME, "audio": True, "volume": 40, "muted": False,
+            "auto_close": False, "close_delay": 10}  # iPhone が切れても既定では映像ウィンドウを閉じない
 ICON_FONT = ("Segoe MDL2 Assets", 12)
 ICON_VOL, ICON_MUTE = "", ""
 
@@ -282,6 +283,12 @@ class VideoWindow:
         self.toast_lbl = tk.Label(self.win, bg="#2a2b31", fg="#f2f2f4", font=("Yu Gothic UI", 10, "bold"),
                                   padx=10, pady=3)
         self._toast_job = None
+        self.notice_lbl = tk.Label(self.win, bg="#2a2b31", fg="#f2f2f4", font=("Yu Gothic UI", 10),
+                                   padx=14, pady=8, justify="center")
+        for w in (self.toast_lbl, self.notice_lbl):  # お知らせの上でもドラッグ等できるように
+            w.bind("<ButtonPress-1>", self._drag_start)
+            w.bind("<B1-Motion>", self._drag_move)
+            w.bind("<Motion>", lambda e: self._show_close())
         for key, act in (("<Up>", "up"), ("<Down>", "down"), ("<m>", "mute"), ("<M>", "mute")):
             self.win.bind(key, lambda e, a=act: self._volume_key(a))
         for key in ("<r>", "<R>"):
@@ -359,6 +366,15 @@ class VideoWindow:
             if text:
                 self.toast(text)
 
+    def show_notice(self, text):
+        """中央に出し続けるお知らせ (接続が切れたときなど)"""
+        self.notice_lbl.config(text=text)
+        self.notice_lbl.place(relx=0.5, rely=0.5, anchor="center")
+        self.notice_lbl.lift()
+
+    def hide_notice(self):
+        self.notice_lbl.place_forget()
+
     def toast(self, text):
         """左上に一瞬だけ表示 (音量など)"""
         self.toast_lbl.config(text=text)
@@ -417,6 +433,7 @@ class VideoWindow:
         self.close_btn.place_forget()
         self.rotate_btn.place_forget()
         self.toast_lbl.place_forget()
+        self.notice_lbl.place_forget()
         self.win.withdraw()
 
     def toggle_fullscreen(self):
@@ -584,6 +601,23 @@ class MirrorApp:
         tk.Checkbutton(sv, text="音声もPCで鳴らす", variable=self.audio_var, bg=BG, fg=FG,
                        selectcolor=BTN, activebackground=BG, activeforeground=FG,
                        font=("Yu Gothic UI", 9)).pack(anchor="w")
+        # iPhone が切れたときに映像ウィンドウを自動で閉じるか / 何秒後か
+        self.autoclose_var = tk.BooleanVar(value=self.settings["auto_close"])
+        tk.Checkbutton(sv, text="iPhoneが切れたら映像を閉じる", variable=self.autoclose_var,
+                       command=self._refresh_delay_state, bg=BG, fg=FG, selectcolor=BTN,
+                       activebackground=BG, activeforeground=FG, disabledforeground=SUB,
+                       font=("Yu Gothic UI", 9)).pack(anchor="w")
+        delay_row = tk.Frame(sv, bg=BG)
+        delay_row.pack(anchor="w", padx=(24, 0))
+        self.delay_var = tk.StringVar(value=str(self.settings["close_delay"]))
+        self.delay_box = tk.Spinbox(delay_row, from_=0, to=600, increment=5, width=4,
+                                    textvariable=self.delay_var, bg=BTN, fg=FG, insertbackground=FG,
+                                    buttonbackground=BTN, relief="flat", disabledbackground=BG,
+                                    disabledforeground=SUB, font=("Yu Gothic UI", 9), justify="right")
+        self.delay_box.pack(side="left")
+        self.delay_lbl = tk.Label(delay_row, text=" 秒後", bg=BG, fg=FG, font=("Yu Gothic UI", 9))
+        self.delay_lbl.pack(side="left")
+        self._refresh_delay_state()
         done = tk.Label(sv, text="完了", bg=BG, fg=SUB, font=("Yu Gothic UI", 9, "underline"),
                         cursor="hand2")
         done.pack(side="bottom")
@@ -682,11 +716,23 @@ class MirrorApp:
         self.video.show(*self.video.last_src)
         self.video.toast(f"回転 {self.video.rotation}°" if self.video.rotation else "回転なし")
 
+    def _refresh_delay_state(self):
+        on = self.autoclose_var.get()
+        self.delay_box.config(state="normal" if on else "disabled")
+        self.delay_lbl.config(fg=FG if on else SUB)
+
     def close_settings(self):
         self.main_view.tkraise()
+        try:
+            delay = min(max(int(float(self.delay_var.get())), 0), 600)
+        except ValueError:
+            delay = self.settings["close_delay"]
+        self.delay_var.set(str(delay))
+        self.settings.update(auto_close=self.autoclose_var.get(), close_delay=delay)
         name = self.name_var.get().strip() or DEFAULTS["name"]
         self.name_var.set(name)
         if (name, self.audio_var.get()) == (self.settings["name"], self.settings["audio"]):
+            save_settings(self.settings)  # 自動クローズの設定は再起動なしで反映
             return
         self.settings.update(name=name, audio=self.audio_var.get())
         save_settings(self.settings)
@@ -706,7 +752,8 @@ class MirrorApp:
         if self.proc or not self.engine:
             return
         name = self.settings["name"]
-        args = [self.engine, "-n", name, "-nh", "-s", "1920x1920@60", "-fps", "60", "-nohold"]
+        # -nc: 切断されてもエンジンは映像ウィンドウを閉じない (閉じるかどうかはこのアプリが決める)
+        args = [self.engine, "-n", name, "-nh", "-s", "1920x1920@60", "-fps", "60", "-nohold", "-nc"]
         args += FAST_ARGS if self.use_fast else SAFE_ARGS
         if not self.settings["audio"]:
             args += ["-as", "0"]
@@ -736,6 +783,7 @@ class MirrorApp:
             except subprocess.TimeoutExpired:
                 proc.kill()
         self.device = ""
+        self._cancel_auto_close()
         self.video.rotation = 0  # 新しいエンジンは回転なしで始まる
         self.video.hide()
         self.set_state("stopped")
@@ -783,6 +831,7 @@ class MirrorApp:
         m = re.search(r"connection request from (.+?) \(", line)
         if m:
             self.device = m.group(1)
+            self._cancel_auto_close()
         new_stream = re.search(r"geometry is \(w,h\)=\((\d+),(\d+)\) \(source\)", line)
         m = new_stream or re.search(r"iPhoneMirror: size (\d+)x(\d+)", line)
         if m and int(m.group(1)) > 0 and int(m.group(2)) > 0:
@@ -790,12 +839,38 @@ class MirrorApp:
             # 新しい接続 or iPhone 自身が回転した → 手動回転は解除
             if self.video.rotation and (new_stream or size != self.video.last_src):
                 self.set_rotation(0)
+            self._cancel_auto_close()
             self.video.show(*size)
             self.set_state("mirroring")
         if "iPhoneMirror: all clients disconnected" in line:
             self.device = ""
-            self.video.hide()
             self.set_state("waiting")
+            self._on_disconnect()
+
+    # ---- iPhone が切れたとき ----
+    def _on_disconnect(self):
+        self._cancel_auto_close()
+        if not self.video.win.winfo_viewable():
+            return
+        if not self.settings["auto_close"]:  # 既定: 閉じずに待つ
+            self.video.show_notice("iPhoneとの接続が切れました\nもう一度ミラーリングすると再開します")
+            return
+        delay = int(self.settings["close_delay"])
+        if delay <= 0:
+            self.video.hide()
+            return
+        self.video.show_notice(f"iPhoneとの接続が切れました\n{delay}秒後に閉じます")
+        self._close_job = self.root.after(delay * 1000, self._auto_close)
+
+    def _auto_close(self):
+        self._close_job = None
+        self.video.hide()
+
+    def _cancel_auto_close(self):
+        if getattr(self, "_close_job", None):
+            self.root.after_cancel(self._close_job)
+        self._close_job = None
+        self.video.hide_notice()
 
     def _on_exit(self):
         quick = time.time() - self.proc_started < 4
